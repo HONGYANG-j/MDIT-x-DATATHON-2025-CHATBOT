@@ -1,128 +1,206 @@
-# chatbot.py
+# chatbot.py - Advanced Natural Conversational Mental Health Chatbot (OpenAI API version, improved)
 import os
-import openai
 import random
 import re
-from typing import List, Dict, Optional
-from dotenv import load_dotenv
+import sqlite3
+import logging
+from openai import OpenAI
+from dotenv import load_dotenv   # ✅ add this
 
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# ------------------- Load Environment -------------------
+load_dotenv()  # ✅ this reads your .env file
 
-# Helpful positive prompts / fallback
-FALLBACKS = [
-    "I'm here with you — tell me more when you're ready.",
-    "Thanks for sharing. That took courage. Would you like a breathing exercise?",
-    "I hear you. Small steps matter — what's one tiny thing that could help today?"
-]
+# ------------------- Setup Logging -------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("chatbot-api")
 
+# ------------------- OpenAI Setup -------------------
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# ------------------- Database Memory -------------------
+DB_FILE = "chat_memory.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS memory (
+            user TEXT,
+            role TEXT,
+            msg TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_message(user, role, msg):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO memory (user, role, msg) VALUES (?, ?, ?)", (user, role, msg))
+    conn.commit()
+    conn.close()
+
+def load_memory(user, limit=8):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT role, msg FROM memory WHERE user=? ORDER BY rowid DESC LIMIT ?", (user, limit))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows[::-1]  # chronological order
+
+# ------------------- Chatbot Core -------------------
 CRISIS_KEYWORDS = [
     "suicide", "kill myself", "end my life", "i want to die",
-    "dont want to live", "can't go on", "self-harm", "hurt myself"
+    "dont want to live", "can't go on", "self-harm", "hurt myself",
+    "end it all", "worthless", "no reason to live", "give up"
 ]
 
-def contains_crisis(text: str) -> bool:
-    txt = text.lower()
-    return any(k in txt for k in CRISIS_KEYWORDS)
+POSITIVE_REINFORCEMENTS = [
+    "That’s really brave of you to share 💙",
+    "I’m proud of you for opening up 🌸",
+    "Even small steps forward matter 🙏",
+    "You’re stronger than you realize 💪",
+    "It’s okay to take things one step at a time 🌟"
+]
 
-class MentalHealthChatbot:
-    def __init__(self, system_persona: Optional[str] = None, memory_limit: int = 10):
-        """
-        system_persona: the system prompt to instruct the assistant's tone.
-        memory_limit: number of messages to keep in short-term memory.
-        """
-        self.memory_limit = memory_limit
-        self.system_persona = system_persona or (
-            "You are a compassionate, upbeat, and supportive mental health chatbot. "
-            "Always be positive, non-judgmental, and encourage the user. "
-            "When the user expresses crisis or self-harm, respond with immediate supportive language and instruct them to seek emergency help. "
-            "Keep replies concise (1-5 sentences) and friendly. Use simple language, and offer practical small steps the user can try."
+class AdvancedAPIChatbot:
+    def __init__(self):
+        self.user_name = None
+        self.mood = "neutral"
+
+    def analyze_mood(self, text: str) -> str:
+        txt = text.lower()
+        if any(k in txt for k in CRISIS_KEYWORDS):
+            return "crisis"
+        elif any(w in txt for w in ["sad", "depressed", "anxious", "stress", "tired", "angry"]):
+            return "negative"
+        elif any(w in txt for w in ["happy", "good", "great", "excited", "better", "relieved"]):
+            return "positive"
+        return "neutral"
+
+    def get_crisis_response(self):
+        return (
+            "💙 I hear how much pain you're in, and I’m really concerned.\n\n"
+            "This is serious, and you deserve immediate support:\n"
+            "📞 Befrienders KL: +603-7627 2929 (24/7)\n"
+            "📞 Talian Kasih: 15999 (24/7 mental health line)\n"
+            "📞 Emergency: 999 (if you're in danger)\n\n"
+            "You’re not alone. Please reach out to them 🙏"
         )
-        # short-term memory as a list of {"role":"user"/"assistant", "content": "..."}
-        self.memory: List[Dict] = []
 
-    def clear_memory(self):
-        self.memory = []
-
-    def add_to_memory(self, role: str, content: str):
-        self.memory.append({"role": role, "content": content})
-        if len(self.memory) > self.memory_limit:
-            # keep last memory_limit items
-            self.memory = self.memory[-self.memory_limit:]
-
-    def build_messages(self, user_text: str):
-        """
-        Build the messages structure for OpenAI ChatCompletion, including system persona and memory.
-        """
-        messages = [{"role": "system", "content": self.system_persona}]
-        # insert memory (assistant and user exchanges)
-        for m in self.memory:
-            messages.append({"role": m["role"], "content": m["content"]})
-        # the new user message
-        messages.append({"role": "user", "content": user_text})
-        return messages
-
-    def crisis_check(self, user_msg: str) -> Optional[str]:
-        if contains_crisis(user_msg):
-            # Provide crisis resources + supportive wording
-            return (
-                "⚠️ I’m sorry — it sounds like you may be in crisis. "
-                "If you are in immediate danger, please call your local emergency number right now. "
-                "If you’re in Malaysia, Befrienders KL is available 24/7 at +603-7627 2929. "
-                "Would you like breathing guidance or help finding a local helpline?"
-            )
+    def detect_name(self, message: str):
+        patterns = [r"(?:my name is|i'm|call me) (\w+)", r"(?:name's|name is) (\w+)"]
+        for p in patterns:
+            match = re.search(p, message.lower())
+            if match:
+                return match.group(1).capitalize()
         return None
 
-    def safe_postprocess(self, assistant_text: str) -> str:
-        """
-        Ensure positivity and safety. If the model replies with anything negative/toxic,
-        replace with a supportive fallback.
-        """
-        if not assistant_text or assistant_text.strip() == "":
-            return random.choice(FALLBACKS)
+    def humanize(self, response: str) -> str:
+        if not response:
+            return "I'm here with you 💙 What’s been on your mind?"
 
-        tx = assistant_text.strip()
-        # reject obvious toxic words or insults
-        toxic = ["stupid", "idiot", "shut up", "hate you", "kill yourself"]
-        if any(t in tx.lower() for t in toxic):
-            return random.choice(FALLBACKS)
+        # Remove robotic phrasing
+        ai_phrases = ["as an AI", "according to", "research shows", "as a language model"]
+        for phrase in ai_phrases:
+            response = response.replace(phrase, "")
 
-        # ensure short, positive phrasing: optionally rewrite if needed
-        # (we keep simple: trust the model, but fallback if looks bad)
-        return tx
+        # Add natural fillers and soft tone
+        starters = ["Honestly, ", "You know, ", "Well, ", "Hmm, ", "Yeah, "]
+        if random.random() < 0.25 and not response.startswith(tuple(starters)):
+            response = random.choice(starters) + response[0].lower() + response[1:]
 
-    def get_response(self, user_msg: str) -> str:
-        """
-        Primary function: returns assistant reply string.
-        """
-        # crisis check
-        crisis = self.crisis_check(user_msg)
-        if crisis:
-            # do NOT add crisis message to memory as user conversation — but log user message
-            self.add_to_memory("user", user_msg)
-            return crisis
+        # Sprinkle emojis to soften tone
+        if random.random() < 0.4:
+            response += random.choice([" 😊", " 💙", " 🌸", " 🙏", " 🌟", " 🤗"])
 
-        # Build messages with memory and system persona
-        messages = self.build_messages(user_msg)
+        return response.strip()
+
+    def summarize_memory(self, history):
+        """Summarize old messages into a compact note to preserve context."""
+        if len(history) < 4:
+            return history
+        summary_text = "Summary of earlier chat: "
+        summary_text += " | ".join([f"{role}: {msg}" for role, msg in history[:-3]])
+        return [("system", summary_text)] + history[-3:]
+
+    def generate(self, user: str, user_msg: str):
+        # Crisis detection
+        mood = self.analyze_mood(user_msg)
+        if mood == "crisis":
+            save_message(user, "user", user_msg)
+            return self.get_crisis_response()
+
+        # Update mood tracking
+        self.mood = mood
+
+        # Name detection
+        if not self.user_name:
+            name = self.detect_name(user_msg)
+            if name:
+                self.user_name = name
+                save_message(user, "user", user_msg)
+                save_message(user, "assistant", f"Hey {name}! 😊 Nice to meet you. How’s your day?")
+                return f"Hey {name}! 😊 Nice to meet you. How’s your day?"
+
+        # Load memory and summarize if too long
+        history = load_memory(user, limit=8)
+        history = self.summarize_memory(history)
+
+        messages = [{"role": "system", "content": (
+            "You are a warm, supportive mental health companion. "
+            "Speak like a caring friend, not a therapist. "
+            "Be natural, empathetic, casual, and keep hope alive. "
+            "If user shares something heavy, validate gently and encourage self-care."
+        )}]
+        for role, msg in history:
+            messages.append({"role": role, "content": msg})
+        messages.append({"role": "user", "content": user_msg})
 
         try:
-            completion = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
                 messages=messages,
-                temperature=0.7,
+                temperature=0.85,
+                top_p=0.95,
                 max_tokens=200,
-                n=1
+                presence_penalty=0.6,
+                frequency_penalty=0.3
             )
-            assistant_text = completion.choices[0].message.content
+            reply = response.choices[0].message.content.strip()
+
+            # Mood-adaptive reinforcement
+            if self.mood == "negative" and random.random() < 0.5:
+                reply += " " + random.choice(POSITIVE_REINFORCEMENTS)
+
+            reply = self.humanize(reply)
+
         except Exception as e:
-            print(f"[chatbot] OpenAI request failed: {e}")
-            assistant_text = random.choice(FALLBACKS)
+            logger.error(f"API call failed: {e}")
+            reply = random.choice([
+                "Hmm, I got a bit stuck 😅 Could you repeat that?",
+                "Sorry, I froze up for a moment 💙 Can you tell me again?",
+                "Oops, my thoughts scattered 🤔 Could you say that once more?"
+            ])
 
-        # Post-process and ensure positivity/safety
-        assistant_text = self.safe_postprocess(assistant_text)
+        # Save to memory
+        save_message(user, "user", user_msg)
+        save_message(user, "assistant", reply)
+        return reply
 
-        # Save both user and assistant message to memory
-        self.add_to_memory("user", user_msg)
-        self.add_to_memory("assistant", assistant_text)
+# ------------------- Initialize -------------------# ------------------- Initialize -------------------
+bot = AdvancedAPIChatbot()
+init_db()
 
-        return assistant_text
+if __name__ == "__main__":
+    print("🤖 Chatbot is ready! Type 'quit' to exit.\n")
+    user = "default_user"
+
+    while True:
+        msg = input("You: ")
+        if msg.lower() in ["quit", "exit"]:
+            print("Bot: Take care 💙 See you soon!")
+            break
+        reply = bot.generate(user, msg)
+        print("Bot:", reply)
