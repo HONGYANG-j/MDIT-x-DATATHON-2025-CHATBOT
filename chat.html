@@ -78,8 +78,8 @@
       try {
         const response = await fetch("/chat", {
           method: "POST",
-          body: new URLSearchParams({ msg: userText }),
-          headers: { "Content-Type": "application/x-www-form-urlencoded" }
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ msg: userText })  // ✅ send JSON
         });
 
         const data = await response.json();
@@ -105,3 +105,19 @@
   </script>
 </body>
 </html>
+
+# Initialize git in this folder
+git init
+
+# Add all your files to git
+git add .
+
+# Save (commit) your files
+git commit -m "Initial commit - chatbot project"
+
+# Set your GitHub repo as the "remote"
+git branch -M main
+git remote add origin https://github.com/HONGYANG-j/CHATBOT-Online.git
+
+# Push (upload) your code to GitHub
+git push -u origin main
